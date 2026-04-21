@@ -1,0 +1,100 @@
+{
+  "name": "02 – Researcher Agent",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "res-start",
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $input.item.json;\n\nconst filePath   = ctx.file_path   || 'unknown';\nconst language   = ctx.language    || 'unknown';\nconst description= ctx.description || '';\nconst today      = new Date().toISOString().split('T')[0];\nconst safeTitle  = (description || filePath)\n  .replace(/[^a-zA-Z0-9_\\-\\.]/g, '_')\n  .replace(/^_+|_+$/g, '')\n  .substring(0, 60);\n\nreturn [{\n  json: {\n    file_path:    filePath,\n    language:     language,\n    description:  description,\n    today:        today,\n    safe_title:   safeTitle,\n    vault_path:   $env.VAULT_PATH  || '/vault',\n    ollama_url:   $env.OLLAMA_URL  || 'http://ollama:11434',\n    ollama_model: $env.OLLAMA_MODEL|| 'deepseek-r1:7b'\n  }\n}];"
+      },
+      "id": "res-prep",
+      "name": "Prepare Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_url }}/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "={{ $json.ollama_model }}",
+          "stream": false,
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a research assistant for software developers. Given a development context, you produce a structured research note covering best practices, common pitfalls, relevant libraries, and useful patterns. You have broad knowledge up to your training cut-off. Respond ONLY with the markdown document."
+            },
+            {
+              "role": "user",
+              "content": "=Produce a research note for the following development context.\n\nFile: {{ $json.file_path }}\nLanguage: {{ $json.language }}\nContext: {{ $json.description }}\n\nRespond with a complete markdown document starting with YAML frontmatter:\n---\ntitle: \"Research: <concise topic title>\"\ndate: {{ $json.today }}\ntags: [research, {{ $json.language }}, best-practices]\nrelated: []\nsource: \"ollama-research\"\ntype: \"research\"\n---\n\nThen provide:\n## Overview\n<2–3 sentence overview of the topic>\n\n## Best Practices\n- <list of concrete best practices>\n\n## Common Pitfalls\n- <list of things to avoid>\n\n## Recommended Libraries / Tools\n| Name | Purpose | Notes |\n|------|---------|-------|\n\n## Further Reading\n- <titles or topics worth exploring (no hallucinated URLs)>\n"
+            }
+          ]
+        }
+      },
+      "id": "res-llm",
+      "name": "LLM – Research Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prev    = $('Prepare Context').item.json;\nconst resp    = $input.item.json;\nconst content = resp.message?.content || resp.choices?.[0]?.message?.content || '';\n\nconst noteDir  = `${prev.vault_path}/research`;\nconst fileName = `${prev.today}_research_${prev.safe_title}.md`;\nconst fullPath = `${noteDir}/${fileName}`;\n\nreturn [{\n  json: {\n    ...prev,\n    note_content: content,\n    note_dir:     noteDir,\n    file_name:    fileName,\n    full_path:    fullPath\n  }\n}];"
+      },
+      "id": "res-build-path",
+      "name": "Build File Path",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.full_path }}",
+        "dataPropertyName": "note_content",
+        "encoding": "utf8"
+      },
+      "id": "res-write",
+      "name": "Write Research Note",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Build File Path').item.json;\nreturn [{\n  json: {\n    agent:     'researcher',\n    status:    'success',\n    note_path: ctx.full_path,\n    title:     ctx.safe_title,\n    today:     ctx.today\n  }\n}];"
+      },
+      "id": "res-output",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    }
+  ],
+  "connections": {
+    "Start":             { "main": [[{ "node": "Prepare Context",    "type": "main", "index": 0 }]] },
+    "Prepare Context":   { "main": [[{ "node": "LLM – Research Note","type": "main", "index": 0 }]] },
+    "LLM – Research Note": { "main": [[{ "node": "Build File Path",  "type": "main", "index": 0 }]] },
+    "Build File Path":   { "main": [[{ "node": "Write Research Note","type": "main", "index": 0 }]] },
+    "Write Research Note": { "main": [[{ "node": "Return Result",    "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": ["knowledge-graph", "researcher"],
+  "pinData": {}
+}

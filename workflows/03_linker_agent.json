@@ -1,0 +1,159 @@
+{
+  "name": "03 – Linker Agent",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "lnk-start",
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Receive context including the two new note paths from the Orchestrator.\nconst ctx = $input.item.json;\n\nreturn [{\n  json: {\n    new_notes:    ctx.new_notes    || [],   // array of { path, title, type }\n    description:  ctx.description  || '',\n    language:     ctx.language     || '',\n    today:        new Date().toISOString().split('T')[0],\n    vault_path:   $env.VAULT_PATH  || '/vault',\n    ollama_url:   $env.OLLAMA_URL  || 'http://ollama:11434',\n    ollama_model: $env.OLLAMA_MODEL|| 'deepseek-r1:7b'\n  }\n}];"
+      },
+      "id": "lnk-prep",
+      "name": "Prepare Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "path": "={{ $json.vault_path }}",
+        "recursive": true
+      },
+      "id": "lnk-list",
+      "name": "List Vault Files",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build a compact index of existing notes: only .md files, strip vault prefix.\nconst vaultPath = $('Prepare Context').item.json.vault_path;\nconst files     = $input.all();\n\nconst mdFiles = files\n  .map(f => f.json.fileName || f.json.name || f.json.path || '')\n  .filter(n => n.endsWith('.md'))\n  .map(n => n.replace(vaultPath + '/', ''));\n\nconst ctx = $('Prepare Context').item.json;\n\n// Summarise existing notes into a short index string for the prompt.\nconst index = mdFiles.map(f => {\n  // Extract a basename without extension for the wikilink label.\n  const base = f.replace(/^.*\\//, '').replace(/\\.md$/, '');\n  return `- [[${base}]] (${f})`;\n}).join('\\n');\n\nreturn [{\n  json: {\n    ...ctx,\n    existing_notes: mdFiles,\n    index_string:   index\n  }\n}];"
+      },
+      "id": "lnk-index",
+      "name": "Build Note Index",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_url }}/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "={{ $json.ollama_model }}",
+          "stream": false,
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a knowledge-graph linking assistant. Your job is to find meaningful connections between notes in an Obsidian vault and output ONLY a JSON array — no prose, no markdown fences, no explanation."
+            },
+            {
+              "role": "user",
+              "content": "=Below is a list of existing notes in the vault (wikilink format):\n\n{{ $json.index_string }}\n\nNew notes just added:\n{{ JSON.stringify($json.new_notes) }}\n\nContext of the current work session:\nLanguage: {{ $json.language }}\nDescription: {{ $json.description }}\n\nTask: For EACH new note, identify up to 5 existing notes that are semantically related. Return a JSON array with this structure (no markdown fences):\n[\n  {\n    \"new_note_path\": \"<full path of new note>\",\n    \"links_to_add\": [\"[[ExistingNote1]]\", \"[[ExistingNote2]]\"]\n  }\n]\n\nIf no meaningful links exist, return an empty links_to_add array for that note. Output ONLY the JSON array."
+            }
+          ]
+        }
+      },
+      "id": "lnk-llm",
+      "name": "LLM – Find Links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp    = $input.item.json;\nconst rawText = resp.message?.content || resp.choices?.[0]?.message?.content || '[]';\n\n// Strip any accidental markdown fences.\nconst cleaned = rawText\n  .replace(/^```json\\s*/i, '')\n  .replace(/^```\\s*/,      '')\n  .replace(/\\s*```$/,      '')\n  .trim();\n\nlet linkMap = [];\ntry {\n  linkMap = JSON.parse(cleaned);\n} catch(e) {\n  // LLM returned something unparseable — degrade gracefully.\n  linkMap = [];\n}\n\n// Flatten into individual items so the next node can iterate.\nreturn linkMap.map(entry => ({\n  json: {\n    new_note_path: entry.new_note_path,\n    links_to_add:  entry.links_to_add || []\n  }\n}));"
+      },
+      "id": "lnk-parse",
+      "name": "Parse Link Map",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "fileName": "={{ $json.new_note_path }}",
+        "encoding": "utf8"
+      },
+      "id": "lnk-read-note",
+      "name": "Read Note",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Append a ## Related Notes section if there are links to add.\nconst linkInfo   = $('Parse Link Map').item.json;\nconst fileResult = $input.item.json;\n\nif (!linkInfo.links_to_add || linkInfo.links_to_add.length === 0) {\n  // Nothing to do — pass through with no-op flag.\n  return [{ json: { ...linkInfo, skip: true, note_content: fileResult.data } }];\n}\n\nconst originalContent = fileResult.data || '';\nconst linkSection = `\\n\\n## Related Notes\\n${linkInfo.links_to_add.map(l => `- ${l}`).join('\\n')}\\n`;\n\n// Avoid duplicate section.\nconst updated = originalContent.includes('## Related Notes')\n  ? originalContent\n  : originalContent + linkSection;\n\nreturn [{\n  json: {\n    ...linkInfo,\n    skip:         false,\n    note_content: updated\n  }\n}];"
+      },
+      "id": "lnk-append",
+      "name": "Append Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only write if there were actual links to append.\nreturn $input.item.json.skip ? [] : [$input.item];"
+      },
+      "id": "lnk-filter",
+      "name": "Skip If No Links",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.new_note_path }}",
+        "dataPropertyName": "note_content",
+        "encoding": "utf8"
+      },
+      "id": "lnk-write",
+      "name": "Write Updated Note",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    agent:  'linker',\n    status: 'success',\n    links_written: $input.all().length\n  }\n}];"
+      },
+      "id": "lnk-output",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 300]
+    }
+  ],
+  "connections": {
+    "Start":             { "main": [[{ "node": "Prepare Context",    "type": "main", "index": 0 }]] },
+    "Prepare Context":   { "main": [[{ "node": "List Vault Files",   "type": "main", "index": 0 }]] },
+    "List Vault Files":  { "main": [[{ "node": "Build Note Index",   "type": "main", "index": 0 }]] },
+    "Build Note Index":  { "main": [[{ "node": "LLM – Find Links",   "type": "main", "index": 0 }]] },
+    "LLM – Find Links":  { "main": [[{ "node": "Parse Link Map",     "type": "main", "index": 0 }]] },
+    "Parse Link Map":    { "main": [[{ "node": "Read Note",          "type": "main", "index": 0 }]] },
+    "Read Note":         { "main": [[{ "node": "Append Links",       "type": "main", "index": 0 }]] },
+    "Append Links":      { "main": [[{ "node": "Skip If No Links",   "type": "main", "index": 0 }]] },
+    "Skip If No Links":  { "main": [[{ "node": "Write Updated Note", "type": "main", "index": 0 }]] },
+    "Write Updated Note":{ "main": [[{ "node": "Return Result",      "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": ["knowledge-graph", "linker"],
+  "pinData": {}
+}

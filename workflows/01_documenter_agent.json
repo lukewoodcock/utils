@@ -1,0 +1,100 @@
+{
+  "name": "01 – Documenter Agent",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "doc-start",
+      "name": "Start",
+      "type": "n8n-nodes-base.start",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Receive context passed from the Orchestrator via $input.item.json\nconst ctx = $input.item.json;\n\nconst filePath   = ctx.file_path   || 'unknown';\nconst language   = ctx.language    || 'unknown';\nconst description= ctx.description || '';\nconst changedCode= ctx.changed_code|| '';\nconst today      = new Date().toISOString().split('T')[0];\nconst safeTitle  = filePath.replace(/[^a-zA-Z0-9_\\-\\.]/g, '_').replace(/^_+|_+$/g, '');\n\nreturn [{\n  json: {\n    file_path:    filePath,\n    language:     language,\n    description:  description,\n    changed_code: changedCode,\n    today:        today,\n    safe_title:   safeTitle,\n    vault_path:   $env.VAULT_PATH  || '/vault',\n    ollama_url:   $env.OLLAMA_URL  || 'http://ollama:11434',\n    ollama_model: $env.OLLAMA_MODEL|| 'deepseek-r1:7b'\n  }\n}];"
+      },
+      "id": "doc-prep",
+      "name": "Prepare Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_url }}/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "={{ $json.ollama_model }}",
+          "stream": false,
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a technical documentation assistant. Your job is to produce a concise, structured markdown note for a developer knowledge base. Always respond with ONLY the markdown document — no preamble, no explanation outside the document."
+            },
+            {
+              "role": "user",
+              "content": "=Generate a markdown knowledge-base note for the following development activity.\n\nFile: {{ $json.file_path }}\nLanguage: {{ $json.language }}\nDescription: {{ $json.description }}\nCode snippet (may be empty):\n```\n{{ $json.changed_code }}\n```\n\nRespond with a complete markdown document that starts with YAML frontmatter in this exact format:\n---\ntitle: \"<concise title>\"\ndate: {{ $json.today }}\ntags: [<comma-separated tags>]\nrelated: []\nsource: \"ide-webhook\"\ntype: \"code\"\n---\n\nThen write:\n## Summary\n<2–4 sentence summary of what this code does>\n\n## Key Points\n- <bullet points of important implementation details>\n\n## Notes\n<any caveats, TODOs, or observations>\n"
+            }
+          ]
+        }
+      },
+      "id": "doc-llm",
+      "name": "LLM – Generate Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const prev   = $('Prepare Context').item.json;\nconst resp   = $input.item.json;\nconst content= resp.message?.content || resp.choices?.[0]?.message?.content || '';\n\nconst noteDir  = `${prev.vault_path}/code`;\nconst fileName = `${prev.today}_${prev.safe_title}.md`;\nconst fullPath = `${noteDir}/${fileName}`;\n\nreturn [{\n  json: {\n    ...prev,\n    note_content: content,\n    note_dir:     noteDir,\n    file_name:    fileName,\n    full_path:    fullPath\n  }\n}];"
+      },
+      "id": "doc-build-path",
+      "name": "Build File Path",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.full_path }}",
+        "dataPropertyName": "note_content",
+        "encoding": "utf8"
+      },
+      "id": "doc-write",
+      "name": "Write Note to Vault",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Build File Path').item.json;\nreturn [{\n  json: {\n    agent:     'documenter',\n    status:    'success',\n    note_path: ctx.full_path,\n    title:     ctx.safe_title,\n    today:     ctx.today\n  }\n}];"
+      },
+      "id": "doc-output",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    }
+  ],
+  "connections": {
+    "Start":            { "main": [[{ "node": "Prepare Context",    "type": "main", "index": 0 }]] },
+    "Prepare Context":  { "main": [[{ "node": "LLM – Generate Note","type": "main", "index": 0 }]] },
+    "LLM – Generate Note": { "main": [[{ "node": "Build File Path", "type": "main", "index": 0 }]] },
+    "Build File Path":  { "main": [[{ "node": "Write Note to Vault","type": "main", "index": 0 }]] },
+    "Write Note to Vault": { "main": [[{ "node": "Return Result",   "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": ["knowledge-graph", "documenter"],
+  "pinData": {}
+}

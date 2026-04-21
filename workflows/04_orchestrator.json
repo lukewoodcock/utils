@@ -1,0 +1,171 @@
+{
+  "name": "04 – Orchestrator (Swarm Entry Point)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "knowledge-graph/trigger",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "orch-webhook",
+      "name": "Webhook – IDE Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 400],
+      "webhookId": "kg-trigger-001"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and normalise the incoming IDE payload.\nconst body = $input.item.json.body || $input.item.json;\n\nif (!body.file_path && !body.description) {\n  throw new Error('Payload must include at least one of: file_path, description');\n}\n\nconst today     = new Date().toISOString().split('T')[0];\nconst safeTitle = (body.file_path || body.description || 'session')\n  .replace(/[^a-zA-Z0-9_\\-\\.]/g, '_')\n  .replace(/^_+|_+$/g, '')\n  .substring(0, 60);\n\nconst sharedCtx = {\n  file_path:    body.file_path    || '',\n  language:     body.language     || 'unknown',\n  description:  body.description  || '',\n  changed_code: body.changed_code || '',\n  today:        today,\n  safe_title:   safeTitle,\n  vault_path:   $env.VAULT_PATH   || '/vault',\n  ollama_url:   $env.OLLAMA_URL   || 'http://ollama:11434',\n  ollama_model: $env.OLLAMA_MODEL || 'deepseek-r1:7b'\n};\n\nreturn [{ json: sharedCtx }];"
+      },
+      "id": "orch-validate",
+      "name": "Validate & Normalise Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Write a session log entry so there is an audit trail.\nconst ctx     = $input.item.json;\nconst logDir  = `${ctx.vault_path}/logs`;\nconst logFile = `${logDir}/${ctx.today}_session_log.md`;\n\nreturn [{\n  json: {\n    ...ctx,\n    log_dir:  logDir,\n    log_file: logFile,\n    log_entry: `---\\ntitle: \"Session Log ${ctx.today}\"\\ndate: ${ctx.today}\\ntags: [log, session]\\nrelated: []\\nsource: \"orchestrator\"\\ntype: \"log\"\\n---\\n\\n## ${new Date().toISOString()}\\n\\n- **File:** ${ctx.file_path}\\n- **Language:** ${ctx.language}\\n- **Description:** ${ctx.description}\\n`\n  }\n}];"
+      },
+      "id": "orch-log-prep",
+      "name": "Prepare Session Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.log_file }}",
+        "dataPropertyName": "log_entry",
+        "encoding": "utf8"
+      },
+      "id": "orch-log-write",
+      "name": "Write Session Log",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [900, 400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Fan-out: emit the shared context once — downstream branches each pick it up.\nconst ctx = $('Validate & Normalise Input').item.json;\nreturn [{ json: ctx }];"
+      },
+      "id": "orch-fanout",
+      "name": "Fan-Out Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 400]
+    },
+
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_url.replace('ollama:11434', 'n8n:5678') }}/webhook/documenter/trigger",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}"
+      },
+      "id": "orch-call-documenter",
+      "name": "Call Documenter Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_url.replace('ollama:11434', 'n8n:5678') }}/webhook/researcher/trigger",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}"
+      },
+      "id": "orch-call-researcher",
+      "name": "Call Researcher Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1340, 400]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Collect results from Documenter and Researcher.\n// n8n parallel branches converge here via the Merge node.\nreturn [$input.item];"
+      },
+      "id": "orch-merge-passthrough",
+      "name": "Collect Agent Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 300]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByIndex",
+        "options": {}
+      },
+      "id": "orch-merge",
+      "name": "Merge Branch Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [1800, 300]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// Build the new_notes array for the Linker from the two agent responses.\nconst items = $input.all();\nconst ctx   = $('Validate & Normalise Input').item.json;\n\nconst newNotes = items\n  .map(i => i.json)\n  .filter(r => r.note_path)\n  .map(r => ({ path: r.note_path, title: r.title || '', type: r.agent || 'unknown' }));\n\nreturn [{\n  json: {\n    ...ctx,\n    new_notes: newNotes\n  }\n}];"
+      },
+      "id": "orch-build-linker-ctx",
+      "name": "Build Linker Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2020, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.ollama_url.replace('ollama:11434', 'n8n:5678') }}/webhook/linker/trigger",
+        "sendBody": true,
+        "contentType": "json",
+        "body": "={{ JSON.stringify($json) }}"
+      },
+      "id": "orch-call-linker",
+      "name": "Call Linker Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx      = $('Validate & Normalise Input').item.json;\nconst linkerRes= $input.item.json;\n\nreturn [{\n  json: {\n    status:      'complete',\n    session_date: ctx.today,\n    file_path:   ctx.file_path,\n    language:    ctx.language,\n    linker:      linkerRes\n  }\n}];"
+      },
+      "id": "orch-final",
+      "name": "Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2460, 300]
+    }
+  ],
+  "connections": {
+    "Webhook – IDE Trigger":     { "main": [[{ "node": "Validate & Normalise Input", "type": "main", "index": 0 }]] },
+    "Validate & Normalise Input":{ "main": [[{ "node": "Prepare Session Log",        "type": "main", "index": 0 }]] },
+    "Prepare Session Log":       { "main": [[{ "node": "Write Session Log",           "type": "main", "index": 0 }]] },
+    "Write Session Log":         { "main": [[{ "node": "Fan-Out Context",             "type": "main", "index": 0 }]] },
+    "Fan-Out Context": {
+      "main": [
+        [{ "node": "Call Documenter Agent", "type": "main", "index": 0 }],
+        [{ "node": "Call Researcher Agent", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Documenter Agent": { "main": [[{ "node": "Merge Branch Results", "type": "main", "index": 0 }]] },
+    "Call Researcher Agent": { "main": [[{ "node": "Merge Branch Results", "type": "main", "index": 1 }]] },
+    "Merge Branch Results":  { "main": [[{ "node": "Build Linker Context",  "type": "main", "index": 0 }]] },
+    "Build Linker Context":  { "main": [[{ "node": "Call Linker Agent",     "type": "main", "index": 0 }]] },
+    "Call Linker Agent":     { "main": [[{ "node": "Final Response",        "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "staticData": null,
+  "tags": ["knowledge-graph", "orchestrator"],
+  "pinData": {}
+}

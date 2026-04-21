@@ -1,0 +1,84 @@
+version: "3.8"
+
+# ─── volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  n8n_data:
+  ollama_data:
+
+# ─── networks ─────────────────────────────────────────────────────────────────
+networks:
+  swarm_net:
+    driver: bridge
+
+# ─── services ─────────────────────────────────────────────────────────────────
+services:
+
+  # ── Ollama ──────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    networks:
+      - swarm_net
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    # Uncomment the lines below if you have an NVIDIA GPU
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── n8n ─────────────────────────────────────────────────────────────────────
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - swarm_net
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      # ── core ──
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+
+      # ── security ──
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-false}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-changeme}
+
+      # ── timezone ──
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+      TZ: ${TZ:-UTC}
+
+      # ── knowledge graph / vault ──
+      VAULT_PATH: ${VAULT_PATH:-/vault}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-deepseek-r1:7b}
+
+      # ── disable telemetry ──
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # Mount your Obsidian vault here.
+      # Override VAULT_HOST_PATH in .env or export it before running compose.
+      - ${VAULT_HOST_PATH:-./vault}:/vault
+    user: "1000:1000"
