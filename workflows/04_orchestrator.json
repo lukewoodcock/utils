@@ -91,16 +91,6 @@
 
     {
       "parameters": {
-        "jsCode": "// Collect results from Documenter and Researcher.\n// n8n parallel branches converge here via the Merge node.\nreturn [$input.item];"
-      },
-      "id": "orch-merge-passthrough",
-      "name": "Collect Agent Results",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1580, 300]
-    },
-    {
-      "parameters": {
         "mode": "combine",
         "combinationMode": "mergeByIndex",
         "options": {}

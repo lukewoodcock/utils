@@ -1,0 +1,14 @@
+{
+  "name": "swarm-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test:unit":     "jest unit     --runInBand",
+    "test:validate": "jest validate --runInBand",
+    "test":          "jest unit validate --runInBand"
+  },
+  "devDependencies": {
+    "jest":    "^29",
+    "express": "^4"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "file_path":    "src/auth/jwt.py",
+  "language":     "python",
+  "description":  "JWT token refresh with sliding expiry window",
+  "changed_code": "def refresh_token(user_id, token):\n    payload = decode_token(token)\n    return create_token(user_id, expiry=3600)"
+}

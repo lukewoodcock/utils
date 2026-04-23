@@ -1,0 +1,57 @@
+# Docker Compose override for automated testing.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#
+# Changes from the base file:
+#   • Replaces the real Ollama service with the lightweight mock server.
+#   • Binds the mock to host port 11435 to avoid conflicts with a real local Ollama.
+#   • Overrides the n8n vault mount to a temporary test directory.
+#   • Adds an n8n entrypoint that pre-creates vault subdirectories.
+
+version: "3.8"
+
+services:
+
+  # ── Mock Ollama (replaces real ollama service) ──────────────────────────────
+  ollama:
+    image: node:20-alpine
+    container_name: ollama
+    restart: "no"
+    working_dir: /mock
+    command: ["node", "server.js"]
+    volumes:
+      - ./tests/mock-ollama:/mock
+    environment:
+      PORT: "11434"
+    ports:
+      - "11435:11434"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:11434/api/tags"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # ── n8n override: test vault + pre-create subdirs ───────────────────────────
+  n8n:
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - /tmp/swarm-test-vault:/vault
+    environment:
+      VAULT_HOST_PATH: /tmp/swarm-test-vault
+      VAULT_PATH: /vault
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: deepseek-r1:7b
+      # Disable auth for easier API access during tests.
+      N8N_BASIC_AUTH_ACTIVE: "false"
+      # Expose the REST API (needed to import/activate workflows programmatically).
+      N8N_API_KEY: "test-api-key-integration"
+    # Pre-create vault subdirectories before n8n starts.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mkdir -p /vault/code /vault/research /vault/logs
+        exec n8n start
