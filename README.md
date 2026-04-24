@@ -283,6 +283,72 @@ vault is on the host filesystem — nothing is lost.
 
 ---
 
+## Testing
+
+An automated test suite lives under `tests/` with three layers. All test
+targets are exposed via the `Makefile`.
+
+### Fast tests (no Docker required)
+
+```bash
+cd tests && npm install   # one-time — installs Jest + Express
+cd ..
+make test-fast            # runs unit + structure validation (~1 s)
+```
+
+This runs **118 Jest tests**:
+
+| Layer | Covers |
+|-------|--------|
+| `tests/unit/` | Every Code-node JS snippet — `safe_title` sanitisation, LLM response parsing (both Ollama `{message}` and OpenAI `{choices}` formats), env var defaults, JSON fence stripping, link deduplication, graceful parse-failure fallback |
+| `tests/validate/` | Workflow JSON structure — correct trigger node types, webhook paths, no orphan nodes, every connection reaches a real node, Orchestrator fan-out shape |
+
+Code nodes are executed in an isolated `new Function` scope via a lightweight
+n8n mock (`tests/unit/helpers/n8n-mock.js`) — no n8n instance required.
+
+### Integration tests (requires Docker/Podman)
+
+```bash
+make test-integration
+```
+
+Boots the full stack using `docker-compose.yml` + `docker-compose.test.yml`
+(which substitutes a mock Ollama server for deterministic responses), imports
+all four workflows via n8n's REST API, then runs 10 end-to-end cases:
+
+- `IT-1` Webhook returns HTTP 200 on valid payload
+- `IT-2` Code note written to `vault/code/` with required YAML frontmatter (`title`, `date`, `tags`, `source`, `type`)
+- `IT-3` Research note written to `vault/research/` with `type: "research"`
+- `IT-4` Session log written to `vault/logs/`
+- `IT-5` Linker appends `[[wikilinks]]` to at least one note
+- `IT-6` Response body contains `status` and `file_path` fields
+- `IT-7` Empty payload `{}` returns HTTP 4xx
+- `IT-8 – IT-10` Each sub-agent webhook (`documenter/trigger`, `researcher/trigger`, `linker/trigger`) responds with HTTP 200
+
+The integration script uses a Node-based mock Ollama (`tests/mock-ollama/server.js`)
+so tests are deterministic and don't depend on a downloaded LLM.
+
+### All layers + cleanup
+
+```bash
+make test         # runs all three layers
+make test-clean   # tears down test containers and removes /tmp/swarm-test-vault
+```
+
+### Test layout
+
+```
+tests/
+├── unit/                  # Jest unit tests for Code node JS
+├── validate/              # Jest structural tests for workflow JSONs
+├── mock-ollama/           # Express mock server for /api/chat + /api/tags
+└── integration/           # Bash runner for end-to-end Docker tests
+docker-compose.test.yml    # Compose override: mock Ollama + temp vault
+Makefile                   # test-fast, test-integration, test, test-clean
+```
+
+---
+
 ## Architecture notes
 
 - **No external API calls.** Every LLM request goes to `http://ollama:11434/api/chat`.
