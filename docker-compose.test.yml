@@ -16,10 +16,11 @@ services:
     image: node:20-alpine
     container_name: ollama
     restart: "no"
-    working_dir: /mock
+    # Mount the full tests/ tree so Node can resolve express from tests/node_modules/.
+    working_dir: /tests/mock-ollama
     command: ["node", "server.js"]
     volumes:
-      - ./tests/mock-ollama:/mock
+      - ./tests:/tests
     environment:
       PORT: "11434"
     ports:

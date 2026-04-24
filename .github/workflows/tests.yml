@@ -1,0 +1,74 @@
+name: Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [master, main]
+
+jobs:
+
+  # ── Unit & structure validation (no Docker required, ~5 s) ──────────────────
+  unit-validate:
+    name: Unit & Validation Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+
+      - name: Install test dependencies
+        run: npm ci
+        working-directory: tests
+
+      - name: Run unit + validation tests
+        run: make test-fast
+
+  # ── Integration (full Docker stack with mock Ollama, ~3 min) ────────────────
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    # Only runs when unit-validate passes — fail fast on cheap tests first.
+    needs: unit-validate
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+
+      # Install into tests/node_modules/ so the mock Ollama container can
+      # resolve `express` via the mounted ./tests volume.
+      - name: Install test dependencies
+        run: npm ci
+        working-directory: tests
+
+      - name: Create temp vault directories
+        run: mkdir -p /tmp/swarm-test-vault/code /tmp/swarm-test-vault/research /tmp/swarm-test-vault/logs
+
+      - name: Run integration tests
+        run: bash tests/integration/run.sh
+        env:
+          N8N_URL: http://localhost:5678
+          N8N_API_KEY: test-api-key-integration
+          VAULT_HOST_PATH: /tmp/swarm-test-vault
+
+      - name: Dump n8n logs on failure
+        if: failure()
+        run: |
+          docker compose \
+            -f docker-compose.yml \
+            -f docker-compose.test.yml \
+            logs n8n --tail 100 || true
+
+      - name: Teardown
+        if: always()
+        run: make test-clean
